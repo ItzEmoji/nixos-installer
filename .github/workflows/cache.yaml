@@ -1,0 +1,77 @@
+name: Build nvf (x86_64, aarch64) and push to Attic
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64-linux
+            runner: ubuntu-latest
+          - arch: aarch64-linux
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
+    environment: cache
+
+    env:
+      ATTIC_SERVER: ${{ secrets.ATTIC_SERVER }}
+      ATTIC_CACHE:  ${{ secrets.ATTIC_CACHE }}
+      ATTIC_TOKEN:  ${{ secrets.ATTIC_TOKEN }}
+
+      NIX_CONFIG: |
+        experimental-features = nix-command flakes
+        accept-flake-config = true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # -------------------------
+      # Install Nix
+      # -------------------------
+      - name: Install Nix
+        uses: cachix/install-nix-action@v25
+        with:
+          extra_nix_config: |
+            system-features = kvm big-parallel
+            access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
+
+      # -------------------------
+      # Install & Configure Attic
+      # -------------------------
+      - name: Install Attic
+        run: |
+          nix profile install nixpkgs#attic-client
+
+      - name: Configure Attic
+        run: |
+          attic login local "$ATTIC_SERVER" "$ATTIC_TOKEN"
+          attic use "$ATTIC_CACHE"
+
+      # -------------------------
+      # Build
+      # -------------------------
+      - name: Build nvf (${{ matrix.arch }})
+        run: |
+          set -euxo pipefail
+          nix build .#packages.${{ matrix.arch }}.default \
+            --accept-flake-config \
+            -o result
+
+      # -------------------------
+      # Push
+      # -------------------------
+      - name: Push build result to Attic
+        run: |
+          set -euxo pipefail
+          attic push "$ATTIC_CACHE" ./result --ignore-upstream-cache-filter
+
