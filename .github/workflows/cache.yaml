@@ -1,4 +1,4 @@
-name: Build nvf (x86_64, aarch64) and push to Attic
+name: Build Package (x86_64, aarch64) and push to Attic
 
 on:
   push:
@@ -60,7 +60,7 @@ jobs:
       # -------------------------
       # Build
       # -------------------------
-      - name: Build nvf (${{ matrix.arch }})
+      - name: Build Package (${{ matrix.arch }})
         run: |
           set -euxo pipefail
           nix build .#packages.${{ matrix.arch }}.default \
