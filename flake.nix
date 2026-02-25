@@ -39,14 +39,7 @@
                 self.packages.${pkgs.system}.default
               ];
             };
-          homeManagerModules.nixos-installer =
-            { pkgs, ... }:
-            {
-              home.packages = [
-                self.packages.${pkgs.system}.default
-              ];
-            };
-          flakeModuels.nixos-installer = {
+          flakeModules.nixos-installer = {
             perSystem =
               { pkgs, system, ... }:
               {
