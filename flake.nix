@@ -29,6 +29,34 @@
         "x86_64-linux"
         "aarch64-linux"
       ];
+      flake =
+        { self, ... }:
+        {
+          nixosModules.nixos-installer =
+            { pkgs, ... }:
+            {
+              environment.systemPackages = [
+                self.packages.${pkgs.system}.default
+              ];
+            };
+          homeManagerModules.nixos-installer =
+            { pkgs, ... }:
+            {
+              home.packages = [
+                self.packages.${pkgs.system}.default
+              ];
+            };
+          flakeModuels.nixos-installer = {
+            perSystem =
+              { pkgs, system, ... }:
+              {
+                app.default = {
+                  program = "${self.packages.${system}.nvim}/bin/nvim";
+                };
+              };
+
+          };
+        };
       perSystem =
         { config, ... }:
         let

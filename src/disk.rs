@@ -31,7 +31,7 @@ pub fn clone_repo(url: &str, dest: &std::path::Path, state: Arc<Mutex<CloneState
     let mut cmd = Command::new("git");
     cmd.args(["clone", "--progress", url])
         .arg(dest.as_os_str())
-        .stdout(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 
     match cmd.spawn() {
@@ -458,6 +458,40 @@ pub fn git_add_all(base_path: &std::path::Path) -> Result<(), String> {
 /// Reboot the system.
 pub fn reboot() -> Result<(), String> {
     run_cmd("reboot", &[])
+}
+
+/// Run an install hook script with installer context as environment variables.
+/// Returns Ok(output) with the script's combined stdout+stderr, or Err on failure.
+pub fn run_hook(
+    script_path: &str,
+    host_name: &str,
+    base_path: &std::path::Path,
+    disk_path: &str,
+) -> Result<String, String> {
+    let output = Command::new(script_path)
+        .env("INSTALLER_HOST_NAME", host_name)
+        .env("INSTALLER_BASE_PATH", base_path.to_string_lossy().as_ref())
+        .env("INSTALLER_DISK", disk_path)
+        .env("INSTALLER_MOUNT_ROOT", "/mnt")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .map_err(|e| format!("Failed to run hook '{}': {}", script_path, e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let combined = format!("{}{}", stdout, stderr);
+
+    if !output.status.success() {
+        return Err(format!(
+            "Hook '{}' failed with exit code {:?}\n{}",
+            script_path,
+            output.status.code(),
+            combined.trim()
+        ));
+    }
+
+    Ok(combined)
 }
 
 fn run_cmd(cmd: &str, args: &[&str]) -> Result<(), String> {

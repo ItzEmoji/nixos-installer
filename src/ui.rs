@@ -133,7 +133,8 @@ pub fn render(frame: &mut Frame, app: &mut App) {
 fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let t = &app.theme;
     let title = format!(
-        " NixOS Installer - {} [{}/{}] ",
+        " {} - {} [{}/{}] ",
+        app.branding_title,
         app.step_title(),
         app.step_number(),
         app.total_steps()

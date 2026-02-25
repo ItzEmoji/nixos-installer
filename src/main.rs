@@ -195,12 +195,19 @@ fn main() -> io::Result<()> {
         installer_config.theme = Some(theme);
     }
 
-    // Resolve the theme
-    let theme = installer_config
+    // Resolve the theme (base theme + optional custom overrides)
+    let mut theme = installer_config
         .theme
         .as_ref()
         .unwrap_or(&ThemeName::CatppuccinMocha)
         .to_theme();
+
+    // Apply custom color overrides from config if present
+    if let Some(ref custom) = installer_config.theme_custom {
+        if custom.has_overrides() {
+            theme = theme.with_custom_overrides(custom);
+        }
+    }
 
     // Determine the repo URL: CLI --repo > config repo_url > env > default
     let cli_repo_url = cli.repo_url.or_else(|| installer_config.repo_url.clone());
@@ -463,36 +470,6 @@ fn run(
                     _ => {}
                 },
 
-                // ---- User password ----
-                Step::UserPassword => match key.code {
-                    KeyCode::Enter => app.confirm_user_password(),
-                    KeyCode::Backspace => {
-                        app.current_password.pop();
-                    }
-                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.current_password.pop();
-                    }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.current_password.push(c)
-                    }
-                    _ => {}
-                },
-
-                // ---- User password confirm ----
-                Step::UserPasswordConfirm => match key.code {
-                    KeyCode::Enter => app.confirm_user_password_confirm(),
-                    KeyCode::Backspace => {
-                        app.current_password_confirm.pop();
-                    }
-                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.current_password_confirm.pop();
-                    }
-                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                        app.current_password_confirm.push(c)
-                    }
-                    _ => {}
-                },
-
                 // ---- Add another user? ----
                 Step::AddAnotherUser => match key.code {
                     KeyCode::Left | KeyCode::Char('h') => app.another_user_cursor = 0,
@@ -729,6 +706,36 @@ fn run(
                     }
                     KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                         app.root_password_confirm.push(c)
+                    }
+                    _ => {}
+                },
+
+                // ---- User password (post-install) ----
+                Step::UserPassword => match key.code {
+                    KeyCode::Enter => app.confirm_user_password(),
+                    KeyCode::Backspace => {
+                        app.current_password.pop();
+                    }
+                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.current_password.pop();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.current_password.push(c)
+                    }
+                    _ => {}
+                },
+
+                // ---- User password confirm (post-install) ----
+                Step::UserPasswordConfirm => match key.code {
+                    KeyCode::Enter => app.confirm_user_password_confirm(),
+                    KeyCode::Backspace => {
+                        app.current_password_confirm.pop();
+                    }
+                    KeyCode::Char('h') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.current_password_confirm.pop();
+                    }
+                    KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        app.current_password_confirm.push(c)
                     }
                     _ => {}
                 },

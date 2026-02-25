@@ -34,11 +34,6 @@ fn discover_nix_files_with_fd(dir: &Path) -> Vec<(String, PathBuf)> {
         return Vec::new();
     }
 
-    let fd_args = format!(
-        "fd --type f --extension nix --no-ignore --absolute-path . {}",
-        dir.display()
-    );
-
     // Try bare `fd` first (fast path if already on PATH).
     let output = Command::new("fd")
         .args(["--type", "f", "--extension", "nix", "--no-ignore", "--absolute-path"])
@@ -46,11 +41,14 @@ fn discover_nix_files_with_fd(dir: &Path) -> Vec<(String, PathBuf)> {
         .arg(dir)
         .output();
 
-    // If bare fd failed (not found / non-zero), fall back to nix-shell.
+    // If bare fd failed (not found / non-zero), fall back to `find` which is
+    // always available. The previous nix-shell fallback could take over a
+    // minute to download fd, causing the UI to freeze.
     let output = match &output {
         Ok(o) if o.status.success() => output,
-        _ => Command::new("nix-shell")
-            .args(["-p", "fd", "--run", &fd_args])
+        _ => Command::new("find")
+            .arg(dir)
+            .args(["-type", "f", "-name", "*.nix"])
             .output(),
     };
 
@@ -337,10 +335,12 @@ fn hm_attr(name: &str) -> String {
 ///
 /// `hm_base_modules` comes from config.toml and lists modules that are
 /// always included (e.g. `["home"]`).
+///
+/// Passwords are NOT embedded in the Nix configuration. They are set
+/// post-install via `nixos-enter --root /mnt -- chpasswd`.
 pub fn generate_user_nix(
     host_name: &str,
     username: &str,
-    password_hash: &str,
     hm_modules: &[NixModule],
     package_modules: &[NixModule],
     hm_base_modules: &[String],
@@ -406,13 +406,11 @@ pub fn generate_user_nix(
          \x20     users.users.{username} = {{\n\
          \x20       isNormalUser = true;\n\
          \x20       extraGroups = [ \"wheel\" ];\n\
-         \x20       initialHashedPassword = \"{password_hash}\";\n\
          \x20     }};{hm_block}\n\
          \x20   }};\n\
          }}\n",
         module_name = module_name,
         username = username,
-        password_hash = password_hash,
         hm_block = hm_block,
     )
 }
@@ -471,6 +469,9 @@ pub fn write_hardware_config(
 
 /// Hash a password using mkpasswd or openssl (mirrors install.sh step_set_password).
 /// Passes the password via stdin to avoid exposing it in /proc/<pid>/cmdline.
+/// NOTE: This is kept for potential future use but is no longer called during
+/// the wizard flow. Passwords are set post-install via nixos-enter + chpasswd.
+#[allow(dead_code)]
 pub fn hash_password(password: &str) -> Result<String, String> {
     use std::io::Write;
 

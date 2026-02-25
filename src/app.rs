@@ -17,7 +17,6 @@ pub const LOG_FILE: &str = "/tmp/nixos-installer.log";
 pub struct UserEntry {
     pub username: String,
     pub password: String,
-    pub password_hash: String,
     pub hm_modules: Vec<NixModule>,
     pub package_modules: Vec<NixModule>,
     pub needs_hm_selection: bool,
@@ -49,8 +48,6 @@ pub enum Step {
     SelectNixosModules,
     SelectSystemPackages,
     CreateUser,
-    UserPassword,
-    UserPasswordConfirm,
     AddAnotherUser,
     SelectHmModules,
     SelectUserPackages,
@@ -65,6 +62,8 @@ pub enum Step {
     Installing,
     RootPassword,
     RootPasswordConfirm,
+    UserPassword,
+    UserPasswordConfirm,
     Complete,
 }
 
@@ -142,6 +141,9 @@ pub struct App {
     pub root_password_confirm: String,
     pub root_password_mismatch: bool,
 
+    // Post-install user password collection
+    pub password_user_index: usize,
+
     // Add another user / partition prompt
     pub another_user_cursor: usize,
     pub another_partition_cursor: usize,
@@ -167,6 +169,9 @@ pub struct App {
 
     // Active color theme
     pub theme: Theme,
+
+    // Branding title from config (used in header)
+    pub branding_title: String,
 }
 
 impl App {
@@ -206,6 +211,9 @@ impl App {
                 )
             };
 
+        let branding = cfg.branding_title.clone()
+            .unwrap_or_else(|| "NixOS Installer".to_string());
+
         let mut app = Self {
             step,
             should_quit: false,
@@ -225,7 +233,7 @@ impl App {
             is_custom: false,
 
             host_name: String::new(),
-            host_name_input: String::new(),
+            host_name_input: cfg.default_hostname.clone().unwrap_or_default(),
 
             nixos_modules,
             nixos_cursor: 0,
@@ -252,7 +260,7 @@ impl App {
 
             partition_mode: PartitionMode::FullDisk,
             partition_mode_cursor: 0,
-            swap_size_input: "4".to_string(),
+            swap_size_input: cfg.default_swap_size.clone().unwrap_or_else(|| "4".to_string()),
             partitions: Vec::new(),
 
             part_mount_input: String::new(),
@@ -265,6 +273,8 @@ impl App {
             root_password: String::new(),
             root_password_confirm: String::new(),
             root_password_mismatch: false,
+
+            password_user_index: 0,
 
             another_user_cursor: 0,
             another_partition_cursor: 0,
@@ -285,6 +295,8 @@ impl App {
             config: cfg,
 
             theme,
+
+            branding_title: branding,
         };
 
         // If we need to clone, start the background clone thread
@@ -387,6 +399,19 @@ impl App {
         self.nixos_modules = nix::scan_nixos_modules(&self.base_path);
         self.system_packages = nix::scan_package_modules(&self.base_path);
 
+        // Apply repo-level config defaults that weren't set at startup
+        if self.host_name_input.is_empty() {
+            if let Some(ref h) = self.config.default_hostname {
+                self.host_name_input = h.clone();
+            }
+        }
+        if let Some(ref s) = self.config.default_swap_size {
+            self.swap_size_input = s.clone();
+        }
+        if let Some(ref t) = self.config.branding_title {
+            self.branding_title = t.clone();
+        }
+
         self.step = Step::SelectPreset;
     }
 
@@ -417,17 +442,6 @@ impl App {
                 } else {
                     self.step = Step::SelectPreset;
                 }
-                true
-            }
-            Step::UserPassword => {
-                // Go back to username entry, clear partial input
-                self.current_password.clear();
-                self.step = Step::CreateUser;
-                true
-            }
-            Step::UserPasswordConfirm => {
-                self.current_password_confirm.clear();
-                self.step = Step::UserPassword;
                 true
             }
 
@@ -478,7 +492,8 @@ impl App {
             }
 
             // Can't go back from active installation or post-install steps
-            Step::Installing | Step::RootPassword | Step::RootPasswordConfirm | Step::Complete => {
+            Step::Installing | Step::RootPassword | Step::RootPasswordConfirm
+            | Step::UserPassword | Step::UserPasswordConfirm | Step::Complete => {
                 false
             }
         }
@@ -500,6 +515,7 @@ impl App {
             // Existing preset
             self.is_custom = false;
             self.host_name = self.presets[self.preset_cursor].name.clone();
+            self.prefill_username_if_empty();
             self.step = Step::CreateUser;
         }
     }
@@ -520,7 +536,18 @@ impl App {
     }
 
     pub fn confirm_system_packages(&mut self) {
+        self.prefill_username_if_empty();
         self.step = Step::CreateUser;
+    }
+
+    /// Pre-fill the username input from config if the user list is empty
+    /// and a default_username is configured.
+    fn prefill_username_if_empty(&mut self) {
+        if self.users.is_empty() && self.current_username.is_empty() {
+            if let Some(ref name) = self.config.default_username {
+                self.current_username = name.clone();
+            }
+        }
     }
 
     pub fn confirm_username(&mut self) {
@@ -549,7 +576,24 @@ impl App {
             return;
         }
         self.status_message = None;
-        self.step = Step::UserPassword;
+
+        // Check if user config already exists
+        let needs_hm = !nix::user_config_exists(
+            &self.base_path,
+            &self.host_name,
+            &name,
+        );
+
+        self.users.push(UserEntry {
+            username: name,
+            password: String::new(),
+            hm_modules: Vec::new(),
+            package_modules: Vec::new(),
+            needs_hm_selection: needs_hm,
+        });
+
+        self.current_username.clear();
+        self.step = Step::AddAnotherUser;
     }
 
     pub fn confirm_user_password(&mut self) {
@@ -571,54 +615,47 @@ impl App {
         }
         self.password_mismatch = false;
 
-        // Hash the password
-        let password_hash = match nix::hash_password(&self.current_password) {
-            Ok(hash) => hash,
-            Err(e) => {
-                self.status_message = Some(format!(
-                    "Failed to hash password: {}. Please ensure mkpasswd or openssl is available.",
-                    e
-                ));
-                self.current_password.clear();
-                self.current_password_confirm.clear();
-                self.step = Step::UserPassword;
-                return;
-            }
-        };
+        // Set the password for this user via nixos-enter
+        let username = self.users[self.password_user_index].username.clone();
+        self.log_install(&format!("Setting password for user '{}'...", username));
+        if let Err(e) = disk::set_user_password_in_target(&username, &self.current_password) {
+            self.status_message = Some(format!(
+                "Failed to set password for '{}': {}. Press any key to retry.",
+                username, e
+            ));
+            self.current_password.clear();
+            self.current_password_confirm.clear();
+            // Stay on this user — retry
+            self.step = Step::UserPassword;
+            return;
+        }
 
-        // Check if user config already exists
-        let needs_hm = !nix::user_config_exists(
-            &self.base_path,
-            &self.host_name,
-            &self.current_username,
-        );
-
-        let hm_modules = if needs_hm {
-            nix::scan_hm_modules(&self.base_path)
-        } else {
-            Vec::new()
-        };
-
-        let package_modules = if needs_hm {
-            nix::scan_package_modules(&self.base_path)
-        } else {
-            Vec::new()
-        };
-
-        self.users.push(UserEntry {
-            username: self.current_username.clone(),
-            password: self.current_password.clone(),
-            password_hash,
-            hm_modules,
-            package_modules,
-            needs_hm_selection: needs_hm,
-        });
-
-        self.current_username.clear();
+        // Store the password (in case it's needed later) and advance
+        self.users[self.password_user_index].password = self.current_password.clone();
         self.current_password.clear();
         self.current_password_confirm.clear();
 
-        self.step = Step::AddAnotherUser;
+        // Move to next user
+        self.password_user_index += 1;
+        self.advance_to_next_user_password();
+    }
+
+    /// After root password is set, begin collecting passwords for each user.
+    fn begin_user_password_collection(&mut self) {
+        self.password_user_index = 0;
+        self.advance_to_next_user_password();
+    }
+
+    /// Advance to the next user that needs a password, or go to Complete.
+    fn advance_to_next_user_password(&mut self) {
+        if self.password_user_index < self.users.len() {
+            self.current_password.clear();
+            self.current_password_confirm.clear();
+            self.password_mismatch = false;
+            self.step = Step::UserPassword;
+        } else {
+            self.step = Step::Complete;
+        }
     }
 
     pub fn confirm_another_user(&mut self) {
@@ -641,6 +678,11 @@ impl App {
         // Find the next user that needs HM selection
         while self.hm_user_index < self.users.len() {
             if self.users[self.hm_user_index].needs_hm_selection {
+                // Scan HM modules and package modules on demand
+                self.users[self.hm_user_index].hm_modules =
+                    nix::scan_hm_modules(&self.base_path);
+                self.users[self.hm_user_index].package_modules =
+                    nix::scan_package_modules(&self.base_path);
                 // Load their HM modules for selection
                 self.hm_modules = self.users[self.hm_user_index].hm_modules.clone();
                 self.hm_cursor = 0;
@@ -869,26 +911,8 @@ impl App {
             return;
         }
 
-        // Set user passwords in target
-        let mut password_warnings = Vec::new();
-        for user in &self.users {
-            self.install_log
-                .push(format!("Setting password for user '{}'...", user.username));
-            if let Err(e) = disk::set_user_password_in_target(&user.username, &user.password) {
-                let warning = format!(
-                    "Warning: Failed to set password for '{}': {}",
-                    user.username, e
-                );
-                self.install_log.push(warning.clone());
-                password_warnings.push(warning);
-            }
-        }
-
-        if !password_warnings.is_empty() {
-            self.status_message = Some(password_warnings.join("\n"));
-        }
-
-        self.step = Step::Complete;
+        // Now collect and set passwords for each user
+        self.begin_user_password_collection();
     }
 
     pub fn confirm_reboot(&mut self) {
@@ -913,10 +937,15 @@ impl App {
     }
 
     fn start_installation(&mut self) {
+        // Calculate total steps: base 9 + pre-hooks + post-hooks
+        let pre_hook_count = self.config.pre_install_hooks.len();
+        let post_hook_count = self.config.post_install_hooks.len();
+        let total = 9 + pre_hook_count + post_hook_count;
+
         let state = Arc::new(Mutex::new(InstallState {
             log: Vec::new(),
             progress: 0,
-            total: 9,
+            total,
             error: None,
             done: false,
         }));
@@ -942,6 +971,8 @@ impl App {
         let users = self.users.clone();
         let accept_flake_config = self.accept_flake_config;
         let installer_config = self.config.clone();
+        let pre_hooks = self.config.pre_install_hooks.clone();
+        let post_hooks = self.config.post_install_hooks.clone();
 
         std::thread::spawn(move || {
             // Helper: log a message to shared state and the log file.
@@ -1063,7 +1094,6 @@ impl App {
                 let user_nix = nix::generate_user_nix(
                     &host_name,
                     &user.username,
-                    &user.password_hash,
                     &user.hm_modules,
                     &user.package_modules,
                     &installer_config.hm_base_modules,
@@ -1091,9 +1121,34 @@ impl App {
                 return;
             }
 
-            // Step 8: Run nixos-install (stream output in real time)
+            // Pre-install hooks
+            let mut step_counter = 7;
+            for hook in &pre_hooks {
+                log(&state, &format!("Running pre-install hook: {}...", hook));
+                set_progress(&state, step_counter);
+                match disk::run_hook(hook, &host_name, &base_path, &disk_path) {
+                    Ok(output) => {
+                        for line in output.lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                log(&state, &format!("  [hook] {}", trimmed));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Pre-install hook failed: {}", e);
+                        log_error(&state, &msg);
+                        fail(&state, msg);
+                        return;
+                    }
+                }
+                step_counter += 1;
+            }
+
+            // Step N: Run nixos-install (stream output in real time)
             log(&state, "Running nixos-install (this may take a while)...");
-            set_progress(&state, 7);
+            set_progress(&state, step_counter);
+            step_counter += 1;
             let flake_arg = format!("{}#{}", base_path.to_string_lossy(), host_name);
             let mut cmd = std::process::Command::new("nixos-install");
             cmd.args(["--flake", &flake_arg, "--no-root-passwd"])
@@ -1154,7 +1209,8 @@ impl App {
                 }
             }
 
-            set_progress(&state, 8);
+            set_progress(&state, step_counter);
+            step_counter += 1;
             log(&state, "Copying repository to /mnt/etc/nixos/...");
             if let Err(e) = disk::copy_repo_to_target(&base_path) {
                 let msg = format!("Failed to copy repo to target: {}", e);
@@ -1163,7 +1219,30 @@ impl App {
                 return;
             }
 
-            set_progress(&state, 9);
+            // Post-install hooks
+            for hook in &post_hooks {
+                log(&state, &format!("Running post-install hook: {}...", hook));
+                set_progress(&state, step_counter);
+                match disk::run_hook(hook, &host_name, &base_path, &disk_path) {
+                    Ok(output) => {
+                        for line in output.lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                log(&state, &format!("  [hook] {}", trimmed));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let msg = format!("Post-install hook failed: {}", e);
+                        log_error(&state, &msg);
+                        fail(&state, msg);
+                        return;
+                    }
+                }
+                step_counter += 1;
+            }
+
+            set_progress(&state, step_counter);
             log(&state, "Installation complete!");
             if let Ok(mut s) = state.lock() {
                 s.done = true;
@@ -1199,8 +1278,6 @@ impl App {
             Step::SelectPreset => 2,
             Step::HostName | Step::SelectNixosModules | Step::SelectSystemPackages => 3,
             Step::CreateUser
-            | Step::UserPassword
-            | Step::UserPasswordConfirm
             | Step::AddAnotherUser => 4,
             Step::SelectHmModules | Step::SelectUserPackages => 5,
             Step::SelectDisk => 6,
@@ -1213,12 +1290,13 @@ impl App {
             Step::Confirm => 8,
             Step::Installing => 9,
             Step::RootPassword | Step::RootPasswordConfirm => 10,
-            Step::Complete => 11,
+            Step::UserPassword | Step::UserPasswordConfirm => 11,
+            Step::Complete => 12,
         }
     }
 
     pub fn total_steps(&self) -> usize {
-        11
+        12
     }
 
     /// Step title for the header.
@@ -1234,20 +1312,18 @@ impl App {
                 format!("Create User #{}", n)
             }
             Step::UserPassword => {
-                let name = if self.current_username.is_empty() {
-                    format!("#{}", self.users.len() + 1)
+                if self.password_user_index < self.users.len() {
+                    format!("Set Password for '{}'", self.users[self.password_user_index].username)
                 } else {
-                    format!("'{}'", self.current_username)
-                };
-                format!("Set Password for {}", name)
+                    "Set User Password".to_string()
+                }
             }
             Step::UserPasswordConfirm => {
-                let name = if self.current_username.is_empty() {
-                    format!("#{}", self.users.len() + 1)
+                if self.password_user_index < self.users.len() {
+                    format!("Confirm Password for '{}'", self.users[self.password_user_index].username)
                 } else {
-                    format!("'{}'", self.current_username)
-                };
-                format!("Confirm Password for {}", name)
+                    "Confirm User Password".to_string()
+                }
             }
             Step::AddAnotherUser => "Add Another User?".to_string(),
             Step::SelectHmModules => "Select Home Manager Modules".to_string(),

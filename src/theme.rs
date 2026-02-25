@@ -1,9 +1,10 @@
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 
+use crate::config::{parse_hex_color, CustomThemeConfig};
+
 /// A complete color theme for the installer TUI.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Theme {
     pub name: &'static str,
     pub accent: Color,
@@ -15,6 +16,47 @@ pub struct Theme {
     pub red: Color,
     pub green: Color,
     pub yellow: Color,
+}
+
+impl Theme {
+    /// Apply custom color overrides from a `CustomThemeConfig`.
+    /// Only overrides fields that are `Some` and parse successfully.
+    /// Returns a new theme with the name "custom" if any overrides were applied.
+    pub fn with_custom_overrides(mut self, custom: &CustomThemeConfig) -> Self {
+        let mut any_applied = false;
+
+        macro_rules! apply_override {
+            ($field:ident) => {
+                if let Some(ref hex) = custom.$field {
+                    if let Some((r, g, b)) = parse_hex_color(hex) {
+                        self.$field = Color::Rgb(r, g, b);
+                        any_applied = true;
+                    }
+                }
+            };
+        }
+
+        apply_override!(accent);
+        apply_override!(accent_dim);
+        apply_override!(bg);
+        apply_override!(surface);
+        apply_override!(text);
+        apply_override!(text_dim);
+        apply_override!(red);
+        apply_override!(green);
+        apply_override!(yellow);
+
+        if any_applied {
+            // We can't easily change a &'static str at runtime,
+            // so we leak a small string for the name. This only happens
+            // once at startup so it's fine.
+            self.name = Box::leak(
+                format!("{} (custom)", self.name).into_boxed_str()
+            );
+        }
+
+        self
+    }
 }
 
 /// Theme names that can be specified in config or CLI.
